@@ -1,0 +1,64 @@
+// {
+//   "extends": "./tsconfig.node.json",
+//   "compilerOptions": {
+//     "outDir": "./desktop/dist",
+//     "module": "commonjs",
+//     "target": "ES2022",
+//     "lib": ["ES2022"],
+//     "moduleResolution": "Node",
+//     "allowSyntheticDefaultImports": true,
+//     "lib": ["DOM", "DOM.Iterable", "ESNext"],
+//     "allowJs": true,
+//     "checkJs": false,
+//     "sourceMap": true,
+//     "strict": true,
+//     "noImplicitAny": false,
+//     "esModuleInterop": true,
+//     "skipLibCheck": true,
+//     "forceConsistentCasingInFileNames": true
+//   },
+//   "include": ["desktop/**/*"],
+//   "exclude": ["node_modules", "dist", "desktop/dist"]
+// }
+
+// {
+//   "compilerOptions": {
+//     "outDir": "./desktop/dist",
+//     "module": "commonjs",
+//     "target": "ES2022",
+//     "lib": ["DOM", "DOM.Iterable", "ESNext"],
+//     "moduleResolution": "Node",
+//     "allowSyntheticDefaultImports": true,
+//     "allowJs": true,
+//     "checkJs": false,
+//     "sourceMap": true,
+//     "strict": true,
+//     "noImplicitAny": false,
+//     "esModuleInterop": true,
+//     "skipLibCheck": true,
+//     "forceConsistentCasingInFileNames": true
+//   },
+//   "include": ["desktop/**/*", "electron-app/**/*"],
+//   "exclude": ["node_modules", "dist", "desktop/dist"]
+// }
+
+{
+  "compilerOptions": {
+    "outDir": "./desktop/dist",
+    "module": "ESNext",
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "allowJs": true,
+    "checkJs": false,
+    "sourceMap": true,
+    "strict": true,
+    "noImplicitAny": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["desktop/**/*"],
+  "exclude": ["node_modules", "dist", "desktop/dist"]
+}

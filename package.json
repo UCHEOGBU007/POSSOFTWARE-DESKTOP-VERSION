@@ -1,13 +1,22 @@
 {
-  "name": "STOCKURA -pro",
+  "name": "stockura-pro",
+  "productName": "STOCKURA -pro",
   "private": true,
-  "version": "1.0.0",
   "type": "module",
+  "version": "1.0.0",
+  "main": "desktop/dist/main.js",
+  "description": "An Inventory Management application",
+  "author": "Uchenna Leonard Ogbu",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
-    "build": "vite build",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
     "preview": "vite preview",
-    "format": "oxfmt"
+    "format": "oxfmt",
+    "electron:dev": "npm run electron:tsc && vite",
+    "electron:tsc": "tsc -p tsconfig.electron.json",
+    "electron:build": "npm run clean && npm run electron:tsc && vite build && electron-builder",
+    "build:electron": "electron-builder --config electron-builder.yml --dir",
+    "package": "electron-builder --config electron-builder.yml"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.1",
@@ -26,9 +35,14 @@
     "@types/react-dom": "^19.0.0",
     "@types/web-bluetooth": "^0.0.21",
     "@vitejs/plugin-react": "^6.0.0",
+    "cross-env": "^10.1.0",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
     "oxfmt": "^0.2.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
-    "vite": "^8.1.4"
+    "vite": "^8.1.4",
+    "vite-plugin-electron": "^1.1.2",
+    "vite-plugin-electron-renderer": "^1.0.0"
   }
 }

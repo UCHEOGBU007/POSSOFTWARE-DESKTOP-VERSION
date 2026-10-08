@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/package.json",
   "name": "stockura-pro",
   "productName": "STOCKURA -pro",
   "private": true,
@@ -12,7 +13,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "format": "oxfmt",
-    "electron:dev": "npm run electron:tsc && vite",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true }); require('node:fs').rmSync('desktop/dist', { recursive: true, force: true })\"",
+    "electron:dev": "vite --config vite.electron.config.ts",
     "electron:tsc": "tsc -p tsconfig.electron.json",
     "electron:build": "npm run clean && npm run electron:tsc && vite build && electron-builder",
     "build:electron": "electron-builder --config electron-builder.yml --dir",

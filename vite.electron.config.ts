@@ -58,17 +58,16 @@
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import electron from "vite-plugin-electron";
 import renderer from "vite-plugin-electron-renderer";
 import path from "path";
-
-// Banner to recreate __filename and __dirname in ES module scope
-const esmBanner = `import { fileURLToPath as _fileURLToPath } from "node:url"; import { dirname as _dirname } from "node:path"; const __filename = _fileURLToPath(import.meta.url); const __dirname = _dirname(__filename);`;
 
 export default defineConfig({
   base: "./",
   plugins: [
     react(),
+    tailwindcss(),
     electron([
       {
         entry: "desktop/main.ts",
@@ -80,17 +79,17 @@ export default defineConfig({
             sourcemap: true,
             minify: false,
             outDir: "desktop/dist",
-            rollupOptions: {
+            rolldownOptions: {
               external: ["electron"],
               output: {
-                banner: esmBanner,
+                format: "es",
               },
             },
           },
         },
       },
       {
-        entry: "desktop/preload.ts",
+        entry: "desktop/preload.mts",
         onstart(args) {
           args.reload();
         },
@@ -99,10 +98,14 @@ export default defineConfig({
             sourcemap: "inline",
             minify: false,
             outDir: "desktop/dist",
-            rollupOptions: {
+            lib: {
+              formats: ["es"],
+              fileName: () => "preload.mjs",
+            },
+            rolldownOptions: {
               external: ["electron"],
               output: {
-                banner: esmBanner,
+                format: "es",
               },
             },
           },

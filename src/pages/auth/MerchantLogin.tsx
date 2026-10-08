@@ -12,7 +12,7 @@ import { useAuth } from "../../contexts/AuthContext";
 import { useToast } from "../../components/ui/Toast";
 import { useTheme } from "../../contexts/ThemeContext";
 import { supabase } from "../../lib/supabase"; // Adjust path to your supabase client
-import logo from "@/assest/logo1.svg";
+import logo from "@/assets/favicon.ico";
 
 export default function MerchantLogin() {
   const [email, setEmail] = useState("");

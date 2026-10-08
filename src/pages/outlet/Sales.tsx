@@ -729,6 +729,11 @@ export default function SalesHistory() {
   // Action Handlers
   // ---------------------------------------------------------------------------
   const handleRefund = async (sale: Sale) => {
+    if (!outlet?.id) {
+      error("No outlet is selected.");
+      return;
+    }
+
     // 1. Guard check: Restrict refunds strictly to manager role
     if (!isManager) {
       error("Refund denied: Manager permission is required.");

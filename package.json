@@ -17,8 +17,8 @@
     "electron:dev": "vite --config vite.electron.config.ts",
     "electron:tsc": "tsc -p tsconfig.electron.json",
     "electron:build": "npm run clean && npm run electron:tsc && vite build && electron-builder",
-    "build:electron": "electron-builder --config electron-builder.yml --dir",
-    "package": "electron-builder --config electron-builder.yml"
+    "build:electron": "npm run clean && npm run electron:tsc && vite build && electron-builder --config electron-builder.yml --dir",
+    "package": "npm run clean && npm run electron:tsc && vite build && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.1",

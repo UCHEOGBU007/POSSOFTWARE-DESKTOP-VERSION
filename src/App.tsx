@@ -1,4 +1,10 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import {
+  BrowserRouter,
+  HashRouter,
+  Routes,
+  Route,
+  Navigate,
+} from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { POSProvider } from "./contexts/POSContext";
 import { ToastProvider } from "./components/ui/Toast";
@@ -175,15 +181,17 @@ function AppInner() {
 }
 
 export default function App() {
+  const Router = window.location.protocol === "file:" ? HashRouter : BrowserRouter;
+
   return (
     <ThemeProvider>
-      <BrowserRouter>
+      <Router>
         <ToastProvider>
           <AuthProvider>
             <AppInner />
           </AuthProvider>
         </ToastProvider>
-      </BrowserRouter>
+      </Router>
     </ThemeProvider>
   );
 }

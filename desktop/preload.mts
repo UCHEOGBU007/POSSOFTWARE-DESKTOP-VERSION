@@ -3,27 +3,13 @@ import { contextBridge, ipcRenderer } from "electron";
 
 // Create a safe API object to expose to the renderer process
 const electronAPI = {
-  ipcRenderer: {
-    send: (channel: string, data: any) => {
-      ipcRenderer.send(channel, data);
-    },
-    on: (channel: string, func: (...args: any[]) => void) => {
-      ipcRenderer.on(channel, (_: any, ...args: any[]) => func(...args));
-    },
-    once: (channel: string, func: (...args: any[]) => void) => {
-      ipcRenderer.once(channel, (_: any, ...args: any[]) => func(...args));
-    },
-    removeListener: (channel: string, func: (...args: any[]) => void) => {
-      ipcRenderer.removeListener(channel, func);
-    },
+  printing: {
+    getPrinters: () => ipcRenderer.invoke("printing:get-printers"),
+    print: (printerName?: string) =>
+      ipcRenderer.invoke("printing:print-page", printerName),
+    sendNetworkReceipt: (host: string, port: number, data: Uint8Array) =>
+      ipcRenderer.invoke("printing:send-network-receipt", host, port, data),
   },
 };
 
 contextBridge.exposeInMainWorld("electron", electronAPI);
-
-// Listen for messages from the main process
-ipcRenderer.on("main-process-message", (_event: any, message: any) => {
-  console.log("[Receive Main-process message]:", message);
-});
-
-console.log("Preload script loaded!");

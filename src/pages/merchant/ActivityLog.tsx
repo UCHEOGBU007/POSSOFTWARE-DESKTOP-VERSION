@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, Filter, ShieldAlert } from "lucide-react";
+import { FileText, Filter, ShieldAlert, LoaderCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { db } from "@/db/database";
 import { getSupabaseConfigStatus, supabase } from "@/lib/supabase";
@@ -8,7 +8,7 @@ import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
 import Input from "@/components/ui/Input";
 import Select from "@/components/ui/Select";
-import { formatDate } from "@/utils/helpers";
+import { escapeHtml, formatDate } from "@/utils/helpers";
 import type { AuditAction, AuditLog, Outlet } from "@/types";
 
 const actionLabels: Record<AuditAction, string> = {
@@ -27,6 +27,8 @@ export default function ActivityLog() {
   const [action, setAction] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -55,8 +57,10 @@ export default function ActivityLog() {
             .from("audit_logs")
             .select("*")
             .in("outlet_id", ids)
-            .order("created_at", { ascending: false });
+            .order("created_at", { ascending: false })
+            .range(0, 499);
           if (error) throw error;
+          setHasMore((data ?? []).length === 500);
           records = (data ?? []).map((row: any) => ({
             id: row.id,
             outletId: row.outlet_id,
@@ -98,6 +102,52 @@ export default function ActivityLog() {
     };
   }, [merchant.id]);
 
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const configured = getSupabaseConfigStatus().isConfigured;
+      if (!configured) {
+        setHasMore(false);
+        return;
+      }
+      const ids = outlets.map((outlet) => outlet.id);
+      if (!ids.length) {
+        setHasMore(false);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("audit_logs")
+        .select("*")
+        .in("outlet_id", ids)
+        .order("created_at", { ascending: false })
+        .range(logs.length, logs.length + 499);
+      if (error) throw error;
+      const next = (data ?? []).map((row: any) => ({
+        id: row.id,
+        outletId: row.outlet_id,
+        action: row.action,
+        actorId: row.actor_id,
+        actorName: row.actor_name,
+        actorRole: row.actor_role,
+        productId: row.product_id,
+        productName: row.product_name,
+        saleId: row.sale_id,
+        receiptNumber: row.receipt_number,
+        details: row.details,
+        createdAt: row.created_at,
+        syncStatus: "synced" as const,
+      }));
+      await db.auditLogs.bulkPut(next);
+      setLogs((current) => [...current, ...next]);
+      setHasMore(next.length === 500);
+    } catch (error) {
+      console.error("Unable to load more activity:", error);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   const filtered = useMemo(
     () =>
       logs.filter(
@@ -122,9 +172,18 @@ export default function ActivityLog() {
   const printLog = () => {
     const printWindow = window.open("", "_blank");
     if (!printWindow || !filtered.length) return;
-    printWindow.document.write(
-      `<html><head><title>Merchant Activity Log</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#172033}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #d8dee9;padding:8px;text-align:left}th{background:#f1f5f9}h1{font-size:20px}</style></head><body><h1>Merchant Activity Log</h1><p>Generated ${new Date().toLocaleString()} | ${filtered.length} events</p><table><thead><tr><th>Date</th><th>Outlet</th><th>Action</th><th>Product / Sale</th><th>By</th><th>Details</th></tr></thead><tbody>${filtered.map((log) => `<tr><td>${formatDate(log.createdAt)}</td><td>${outlets.find((outlet) => outlet.id === log.outletId)?.name ?? "Unknown"}</td><td>${actionLabels[log.action]}</td><td>${log.productName ?? log.receiptNumber ?? "-"}</td><td>${log.actorName}</td><td>${log.details ?? "-"}</td></tr>`).join("")}</tbody></table><script>window.onload=function(){window.print();window.close()}</script></body></html>`,
-    );
+    const rows = filtered
+      .map(
+        (log) =>
+          `<tr><td>${escapeHtml(formatDate(log.createdAt))}</td><td>${escapeHtml(outlets.find((outlet) => outlet.id === log.outletId)?.name ?? "Unknown")}</td><td>${escapeHtml(actionLabels[log.action])}</td><td>${escapeHtml(log.productName ?? log.receiptNumber ?? "-")}</td><td>${escapeHtml(log.actorName)}</td><td>${escapeHtml(log.details ?? "-")}</td></tr>`,
+      )
+      .join("");
+    const html = `<html><head><title>Merchant Activity Log</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#172033}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #d8dee9;padding:8px;text-align:left}th{background:#f1f5f9}h1{font-size:20px}</style></head><body><h1>Merchant Activity Log</h1><p>Generated ${escapeHtml(new Date().toLocaleString())} | ${filtered.length} events</p><table><thead><tr><th>Date</th><th>Outlet</th><th>Action</th><th>Product / Sale</th><th>By</th><th>Details</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    printWindow.onload = () => {
+      printWindow.print();
+      printWindow.close();
+    };
+    printWindow.document.write(html);
     printWindow.document.close();
   };
 
@@ -270,6 +329,18 @@ export default function ActivityLog() {
             </tbody>
           </table>
         </div>
+        {hasMore && (
+          <div className="flex justify-center">
+            <Button
+              variant="secondary"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              icon={loadingMore ? <LoaderCircle size={15} className="animate-spin" /> : undefined}
+            >
+              {loadingMore ? "Loading…" : "Load older activity"}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

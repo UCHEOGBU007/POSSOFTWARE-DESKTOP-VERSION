@@ -78,7 +78,7 @@ export default function OutletDashboard() {
     load();
   }, [outlet.id]);
 
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
   const todayRevenue = todaySales.reduce((s, r) => s + r.total, 0);
 
   return (

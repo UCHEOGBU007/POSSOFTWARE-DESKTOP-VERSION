@@ -18,54 +18,15 @@ import Input from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { useTheme } from "@/contexts/ThemeContext";
 import {
+  BILLING_PLANS,
   TIER_LIMITS,
-  type MerchantTier,
+  type PlanCode,
   type BillingCycle,
 } from "@/types/index";
 import { formatCurrency } from "@/utils/helpers";
-import logo from "@/assets/favicon.ico";
+import logo from "@/assets/logo1.svg";
 
-const tiers: { key: MerchantTier; features: string[] }[] = [
-  {
-    key: "basic",
-    features: [
-      "1 outlet",
-      "Unlimited products",
-      "Sales reports",
-      "Customer management",
-      "Staff management",
-      "Expense tracking",
-      "Advanced analytics",
-      "Priority support",
-    ],
-  },
-  {
-    key: "standard",
-    features: [
-      "Up to 5 outlets",
-      "Unlimited products",
-      "Sales reports",
-      "Customer management",
-      "Staff management",
-      "Expense tracking",
-      "Advanced analytics",
-      "Priority support",
-    ],
-  },
-  {
-    key: "premium",
-    features: [
-      "Up to 50 outlets",
-      "Unlimited products",
-      "Sales reports",
-      "Customer management",
-      "Staff management",
-      "Expense tracking",
-      "Advanced analytics",
-      "Priority support",
-    ],
-  },
-];
+const tiers = Object.values(BILLING_PLANS);
 
 export default function MerchantRegister() {
   const { registerMerchant } = useAuth();
@@ -73,7 +34,7 @@ export default function MerchantRegister() {
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
-  const [selectedTier, setSelectedTier] = useState<MerchantTier>("basic");
+  const [selectedTier, setSelectedTier] = useState<PlanCode>("starter");
   const [billingCycle, setBillingCycle] = useState<BillingCycle>("yearly");
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -190,7 +151,7 @@ export default function MerchantRegister() {
                 >
                   Yearly
                   <span className="bg-emerald-500/30 border border-emerald-400/40 text-emerald-300 text-[10px] px-1.5 py-0.5 rounded-full uppercase tracking-wider font-extrabold">
-                    7.5% OFF
+                    2 MONTHS FREE
                   </span>
                 </button>
               </div>
@@ -198,14 +159,14 @@ export default function MerchantRegister() {
 
             {/* Pricing Cards Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-              {tiers.map(({ key, features }) => {
-                const tier = TIER_LIMITS[key];
-                const isSelected = selectedTier === key;
+              {tiers.map((plan) => {
+                const tier = TIER_LIMITS[plan.planCode];
+                const isSelected = selectedTier === plan.planCode;
                 return (
                   <button
-                    key={key}
+                    key={plan.planCode}
                     type="button"
-                    onClick={() => setSelectedTier(key)}
+                    onClick={() => setSelectedTier(plan.planCode)}
                     className={`text-left p-4 sm:p-5 rounded-xl border-2 transition-all duration-200 relative flex flex-col justify-between ${
                       isSelected
                         ? "border-blue-500 bg-blue-600/10"
@@ -213,7 +174,7 @@ export default function MerchantRegister() {
                     }`}
                   >
                     <div>
-                      {key === "standard" && (
+                      {plan.planCode === "business" && (
                         <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded-full mb-3 inline-block font-medium">
                           Popular
                         </span>
@@ -234,7 +195,7 @@ export default function MerchantRegister() {
 
                       {/* Features List */}
                       <ul className="mt-4 space-y-2">
-                        {features.map((f) => (
+                        {plan.features.map((f) => (
                           <li
                             key={f}
                             className="flex items-center gap-2 text-xs text-pos-muted"
@@ -257,16 +218,16 @@ export default function MerchantRegister() {
                         </span>
                         <div className="flex flex-wrap items-baseline gap-1.5">
                           <span className="text-xs line-through text-pos-muted truncate">
-                            {formatCurrency(tier.price * 12, "IDR")}
+                            {formatCurrency(plan.monthlyPrice * 12, "IDR")}
                           </span>
                           <span className="text-xs sm:text-sm font-extrabold text-emerald-400 truncate">
-                            {formatCurrency(tier.yearlyPrice, "IDR")}
+                            {formatCurrency(plan.annualPrice, "IDR")}
                           </span>
                         </div>
                       </div>
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-md shrink-0">
                         <Tag size={10} />
-                        7.5% OFF
+                        2 MONTHS FREE
                       </span>
                     </div>
                   </button>
@@ -294,7 +255,7 @@ export default function MerchantRegister() {
               {billingCycle === "yearly" ? (
                 <span className="text-emerald-400 font-bold">
                   {formatCurrency(TIER_LIMITS[selectedTier].yearlyPrice, "IDR")}
-                  /year (7.5% OFF)
+                  /year (2 MONTHS FREE)
                 </span>
               ) : (
                 `${formatCurrency(TIER_LIMITS[selectedTier].price, "IDR")}/month`

@@ -437,7 +437,7 @@ const defaultForm: CustomerForm = {
 export default function CustomersPage() {
   const { outletSession } = useAuth();
   const outlet = outletSession!.outlet;
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
   const { success, error: showError } = useToast();
 
   // Check if staff has manager role

@@ -165,7 +165,12 @@ function toSupabasePayload(table: SyncTable, record: SyncableRecord) {
       value === undefined ||
       key === "syncStatus" ||
       key === "passwordHash" ||
-      key === "pin"
+      key === "pin" ||
+      key === "pendingReason" ||
+      key === "syncError" ||
+      key === "globalDiscountPercent" ||
+      key === "taxRatePercent" ||
+      key === "wasOffline"
     )
       continue;
     const mappedKey = FIELD_MAP[table]?.[key] ?? key;
@@ -178,12 +183,14 @@ export async function syncPendingDataForOutlet(outletId: string) {
   const { isConfigured } = getSupabaseConfigStatus();
   if (!isConfigured || !outletId) return;
 
-  // Parent records first so foreign-key references are always valid.
+  await syncPendingSalesForOutlet(outletId);
+
+  // Parent records first so foreign-key references are always valid. Sale
+  // rows and sale movements are committed only through record_sale_v2.
   const orderedTables: SyncTable[] = [
     "categories",
     "products",
     "customers",
-    "sales",
     "expenses",
     "stockMovements",
     "auditLogs",
@@ -194,10 +201,150 @@ export async function syncPendingDataForOutlet(outletId: string) {
       .where("outletId")
       .equals(outletId)
       .filter(
-        (record: { syncStatus: string }) => record.syncStatus === "pending",
+        (record: {
+          syncStatus: string;
+          pendingReason?: string;
+          type?: string;
+        }) =>
+          record.syncStatus === "pending" &&
+          record.pendingReason !== "offline-sale" &&
+          !(table === "stockMovements" && record.type === "sale"),
       )
       .toArray();
     for (const record of records) await syncRecord(table, record);
+  }
+}
+
+/** Replay the durable local sale queue using the original sale UUID as the
+ * database idempotency key. A timed-out request can safely be retried. */
+export async function syncPendingSalesForOutlet(outletId: string) {
+  if (!getSupabaseConfigStatus().isConfigured || !navigator.onLine || !outletId)
+    return;
+
+  const queued = await db.sales
+    .where("[outletId+syncStatus]")
+    .equals([outletId, "pending"])
+    .sortBy("createdAt");
+
+  for (const sale of queued) {
+    try {
+      const { data, error } = await supabase.rpc("record_sale_v2", {
+        p_sale_id: sale.id,
+        p_outlet_id: sale.outletId,
+        p_receipt_number: sale.receiptNumber,
+        p_items: sale.items.map((item) => ({
+          product_id: item.productId,
+          quantity: item.qty,
+          discount_percent: item.discount,
+          unit_price: item.unitPrice,
+        })),
+        p_global_discount_percent: sale.globalDiscountPercent ?? 0,
+        p_payment_method: sale.paymentMethod,
+        p_amount_paid: sale.amountPaid,
+        p_customer_id: sale.customerId ?? null,
+        p_note: sale.note?.slice(0, 500) ?? null,
+        p_sold_at: sale.createdAt,
+        p_offline: true,
+        p_tax_rate_percent: sale.taxRatePercent ?? 0,
+      });
+      if (error) throw error;
+      const row = (Array.isArray(data) ? data[0] : data) as
+        | Record<string, any>
+        | null;
+      if (!row?.id) throw new Error("The server did not confirm this sale.");
+
+      const localTotal = sale.total;
+      const serverTotal = Number(row.total);
+      await db.sales.put({
+        ...sale,
+        id: row.id,
+        receiptNumber: row.receipt_number,
+        items: (row.items ?? []).map((item: Record<string, any>) => ({
+          productId: item.productId ?? item.product_id,
+          productName: item.productName ?? item.product_name,
+          sku: item.sku ?? "",
+          qty: Number(item.qty ?? item.quantity),
+          unitPrice: Number(item.unitPrice ?? item.unit_price),
+          discount: Number(item.discount ?? item.discount_percent ?? 0),
+          total: Number(item.total),
+        })),
+        subtotal: Number(row.subtotal),
+        taxAmount: Number(row.tax_amount),
+        discountAmount: Number(row.discount_amount),
+        total: serverTotal,
+        amountPaid: Number(row.amount_paid),
+        change: Number(row.change),
+        paymentMethod: row.payment_method,
+        createdAt: row.created_at,
+        wasOffline: Boolean(row.was_offline),
+        syncStatus: "synced",
+        syncError:
+          Math.abs(localTotal - serverTotal) > 0.01
+            ? `Offline receipt total ${localTotal.toFixed(2)} was adjusted to ${serverTotal.toFixed(2)} by the server. Review this sale.`
+            : undefined,
+      });
+
+      // The server RPC already wrote stock and movement rows atomically.
+      await db.stockMovements
+        .where("saleId")
+        .equals(sale.id)
+        .delete();
+
+      if (sale.customerId) {
+        const { data: cloudCustomer, error: customerError } = await supabase
+          .from("customers")
+          .select("loyalty_points, total_spent, visit_count, updated_at")
+          .eq("id", sale.customerId)
+          .maybeSingle();
+        const cachedCustomer = await db.customers.get(sale.customerId);
+        if (!customerError && cloudCustomer && cachedCustomer) {
+          await db.customers.put({
+            ...cachedCustomer,
+            loyaltyPoints: Number(cloudCustomer.loyalty_points),
+            totalSpent: Number(cloudCustomer.total_spent),
+            visitCount: Number(cloudCustomer.visit_count),
+            updatedAt: cloudCustomer.updated_at,
+          });
+        }
+      }
+
+      const saleProducts = new Set(sale.items.map((item) => item.productId));
+      for (const productId of saleProducts) {
+        const cached = await db.products.get(productId);
+        if (!cached || cached.pendingReason !== "offline-sale") continue;
+        const stillQueued = await db.sales
+          .where("[outletId+syncStatus]")
+          .equals([outletId, "pending"])
+          .toArray();
+        const queuedQuantity = stillQueued.reduce(
+          (sum, queuedSale) =>
+            sum +
+            queuedSale.items
+              .filter((item) => item.productId === productId)
+              .reduce((itemSum, item) => itemSum + item.qty, 0),
+          0,
+        );
+        const { data: cloudProduct, error: productError } = await supabase
+          .from("products")
+          .select("stock, updated_at")
+          .eq("id", productId)
+          .maybeSingle();
+        if (productError || !cloudProduct) continue;
+        await db.products.update(productId, {
+          stock: Math.max(0, Number(cloudProduct.stock) - queuedQuantity),
+          updatedAt: cloudProduct.updated_at,
+          syncStatus: queuedQuantity > 0 ? "pending" : "synced",
+          pendingReason: queuedQuantity > 0 ? "offline-sale" : undefined,
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to sync this sale.";
+      await db.sales.update(sale.id, { syncError: message.slice(0, 500) });
+      // A failure for one queued sale must not prevent later, independent
+      // sales from reaching the server.
+      console.warn(`Offline sale ${sale.receiptNumber} remains queued:`, error);
+    }
   }
 }
 
@@ -256,7 +403,6 @@ export async function syncPendingData() {
     { table: "outlets", field: "syncStatus" },
     { table: "categories", field: "syncStatus" },
     { table: "products", field: "syncStatus" },
-    { table: "sales", field: "syncStatus" },
     { table: "customers", field: "syncStatus" },
     { table: "staff", field: "syncStatus" },
     { table: "expenses", field: "syncStatus" },
@@ -275,6 +421,11 @@ export async function syncPendingData() {
         .toArray();
 
       for (const record of records) {
+        if (
+          record.pendingReason === "offline-sale" ||
+          (entry.table === "stockMovements" && record.type === "sale")
+        )
+          continue;
         await syncRecord(entry.table, record, "upsert");
       }
     } catch (err) {

@@ -1,9 +1,14 @@
 import Button from "@/components/ui/Button";
 import Badge from "@/components/ui/Badge";
-import type { Merchant, MerchantTier } from "@/types";
+import type { Merchant, MerchantTier, PlanCode } from "@/types";
 
 export type MerchantRow = Merchant & { outletCount: number };
-const TIER_OPTIONS: MerchantTier[] = ["basic", "standard", "premium"];
+const TIER_OPTIONS: PlanCode[] = [
+  "starter",
+  "business",
+  "growth",
+  "enterprise",
+];
 
 interface MerchantListProps {
   merchants: MerchantRow[];
@@ -12,7 +17,7 @@ interface MerchantListProps {
   onUpdate: (
     merchant: MerchantRow,
     approval?: "approved" | "rejected",
-    tier?: MerchantTier
+    tier?: MerchantTier,
   ) => void;
 }
 
@@ -97,14 +102,22 @@ export function MerchantList({
                         onUpdate(
                           merchant,
                           undefined,
-                          e.target.value as MerchantTier
+                          e.target.value as MerchantTier,
                         )
                       }
-                      disabled={savingId === merchant.id}
+                      disabled={
+                        savingId === merchant.id ||
+                        merchant.approvalStatus === "approved"
+                      }
                     >
+                      {!TIER_OPTIONS.includes(merchant.tier as PlanCode) && (
+                        <option value={merchant.tier} disabled>
+                          {merchant.tier} (grandfathered)
+                        </option>
+                      )}
                       {TIER_OPTIONS.map((tier) => (
                         <option key={tier} value={tier}>
-                          {tier}
+                          {tier.charAt(0).toUpperCase() + tier.slice(1)}
                         </option>
                       ))}
                     </select>
@@ -117,7 +130,7 @@ export function MerchantList({
                           onUpdate(
                             merchant,
                             "approved",
-                            merchant.requestedTier ?? merchant.tier
+                            merchant.requestedTier ?? merchant.tier,
                           )
                         }
                       >
@@ -170,7 +183,9 @@ export function MerchantList({
 
             <div className="grid grid-cols-2 gap-2 text-xs py-2 border-y border-pos-border/40">
               <div>
-                <span className="text-pos-muted block">Plan (Req / Active):</span>
+                <span className="text-pos-muted block">
+                  Plan (Req / Active):
+                </span>
                 <span className="font-medium text-pos-text capitalize">
                   {merchant.requestedTier ?? merchant.tier} / {merchant.tier}
                 </span>
@@ -200,17 +215,21 @@ export function MerchantList({
                 className="bg-pos-input border border-pos-border rounded px-2 py-1 text-xs"
                 value={merchant.tier}
                 onChange={(e) =>
-                  onUpdate(
-                    merchant,
-                    undefined,
-                    e.target.value as MerchantTier
-                  )
+                  onUpdate(merchant, undefined, e.target.value as MerchantTier)
                 }
-                disabled={savingId === merchant.id}
+                disabled={
+                  savingId === merchant.id ||
+                  merchant.approvalStatus === "approved"
+                }
               >
+                {!TIER_OPTIONS.includes(merchant.tier as PlanCode) && (
+                  <option value={merchant.tier} disabled>
+                    {merchant.tier} (grandfathered)
+                  </option>
+                )}
                 {TIER_OPTIONS.map((tier) => (
                   <option key={tier} value={tier}>
-                    {tier}
+                    {tier.charAt(0).toUpperCase() + tier.slice(1)}
                   </option>
                 ))}
               </select>
@@ -225,7 +244,7 @@ export function MerchantList({
                       onUpdate(
                         merchant,
                         "approved",
-                        merchant.requestedTier ?? merchant.tier
+                        merchant.requestedTier ?? merchant.tier,
                       )
                     }
                   >

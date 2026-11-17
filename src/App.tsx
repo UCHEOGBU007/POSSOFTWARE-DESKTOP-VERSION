@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   BrowserRouter,
   HashRouter,
@@ -10,6 +11,7 @@ import { POSProvider } from "./contexts/POSContext";
 import { ToastProvider } from "./components/ui/Toast";
 import Layout from "./components/layout/Layout";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { useToast } from "./components/ui/Toast";
 import logo from "@/assets/favicon.ico";
 
 // Auth Components & Route Guards
@@ -23,6 +25,7 @@ import MerchantRegister from "./pages/auth/MerchantRegister";
 import OutletLogin from "./pages/auth/OutletLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
 import MerchantManagement from "./pages/admin/MerchantManagement";
+import BillingDashboard from "./pages/admin/BillingDashboard";
 
 // Merchant Pages
 import MerchantDashboard from "./pages/merchant/Dashboard";
@@ -44,7 +47,39 @@ import OutletReports from "./pages/outlet/Reports";
 import OutletSettings from "./pages/outlet/OutletSettings";
 
 function MerchantRoutes() {
-  const { merchantSession, logoutMerchant } = useAuth();
+  const {
+    merchantSession,
+    logoutMerchant,
+    refreshMerchantSubscription,
+  } = useAuth();
+  const { error: showError } = useToast();
+  const merchant = merchantSession?.merchant;
+
+  useEffect(() => {
+    if (!merchant) return;
+    const expiresAt = new Date(merchant.subscriptionExpiry).getTime();
+    if (
+      !Number.isFinite(expiresAt) ||
+      (merchant.subscriptionStatus === "expired" && expiresAt <= Date.now())
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void refreshMerchantSubscription().catch((error) => {
+        console.error("Unable to refresh subscription at term boundary", error);
+        showError("Unable to verify your renewed plan. Please refresh or contact support.");
+      });
+    }, Math.max(0, expiresAt - Date.now() + 500));
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    merchant?.id,
+    merchant?.subscriptionExpiry,
+    merchant?.subscriptionStatus,
+    refreshMerchantSubscription,
+    showError,
+  ]);
 
   // Guarantees merchantSession exists before proceeding
   if (!merchantSession) {
@@ -52,6 +87,10 @@ function MerchantRoutes() {
   }
 
   const tier = merchantSession.merchant.tier;
+  const isSubscriptionExpired =
+    merchantSession.merchant.subscriptionStatus === "expired" ||
+    new Date(merchantSession.merchant.subscriptionExpiry).getTime() <=
+      Date.now();
 
   return (
     <Layout
@@ -61,14 +100,20 @@ function MerchantRoutes() {
       onLogout={logoutMerchant}
     >
       <Routes>
-        <Route path="dashboard" element={<MerchantDashboard />} />
-        <Route path="outlets" element={<OutletsPage />} />
-        <Route path="staff" element={<MerchantStaff />} />
         <Route path="billing" element={<BillingPage />} />
-        <Route path="reports" element={<MerchantReports />} />
-        <Route path="activity" element={<MerchantActivityLog />} />
-        <Route path="settings" element={<MerchantSettings />} />
-        <Route path="*" element={<Navigate to="dashboard" replace />} />
+        {isSubscriptionExpired ? (
+          <Route path="*" element={<Navigate to="billing" replace />} />
+        ) : (
+          <>
+            <Route path="dashboard" element={<MerchantDashboard />} />
+            <Route path="outlets" element={<OutletsPage />} />
+            <Route path="staff" element={<MerchantStaff />} />
+            <Route path="reports" element={<MerchantReports />} />
+            <Route path="activity" element={<MerchantActivityLog />} />
+            <Route path="settings" element={<MerchantSettings />} />
+            <Route path="*" element={<Navigate to="dashboard" replace />} />
+          </>
+        )}
       </Routes>
     </Layout>
   );
@@ -116,7 +161,7 @@ function RootRedirect() {
   if (isLoading) return null;
   if (merchantSession) return <Navigate to="/merchant/dashboard" replace />;
   if (outletSession) return <Navigate to="/outlet/dashboard" replace />;
-  if (adminSession) return <Navigate to="/admin/merchants" replace />;
+  if (adminSession) return <Navigate to="/admin/dashboard" replace />;
   return <Navigate to="/login" replace />;
 }
 
@@ -163,6 +208,14 @@ function AppInner() {
           <ProtectedOutletRoute>
             <OutletRoutes />
           </ProtectedOutletRoute>
+        }
+      />
+      <Route
+        path="/admin/dashboard"
+        element={
+          <ProtectedAdminRoute>
+            <BillingDashboard />
+          </ProtectedAdminRoute>
         }
       />
       <Route

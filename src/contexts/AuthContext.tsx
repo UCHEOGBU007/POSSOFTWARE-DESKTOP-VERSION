@@ -1,14 +1,25 @@
 import {
   createContext,
   useContext,
+  useCallback,
   useState,
   useEffect,
   type ReactNode,
 } from "react";
 import { db } from "../db/database";
 import { supabase, getSupabaseConfigStatus } from "../lib/supabase";
-import type { Merchant, Outlet, Staff, BillingCycle } from "../types";
-import { syncPendingData, syncRecord } from "../lib/sync";
+import type {
+  Merchant,
+  Outlet,
+  Staff,
+  BillingCycle,
+  MerchantTier,
+} from "../types";
+import {
+  syncPendingData,
+  syncPendingDataForOutlet,
+  syncRecord,
+} from "../lib/sync";
 import { generateId } from "@/utils/helpers";
 
 interface MerchantSession {
@@ -45,6 +56,7 @@ interface AuthContextType {
     pin: string,
   ) => Promise<Staff>;
   updateMerchant: (data: Partial<Merchant>) => Promise<void>;
+  refreshMerchantSubscription: () => Promise<void>;
   isLoading: boolean;
 }
 
@@ -62,6 +74,8 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 const MERCHANT_SESSION_KEY = "pos_merchant_session";
 const OUTLET_SESSION_KEY = "pos_outlet_session";
+const OFFLINE_STAFF_LEASE_PREFIX = "pos_offline_staff_lease_";
+const OFFLINE_STAFF_LEASE_MS = 48 * 60 * 60 * 1000;
 const MERCHANT_SELECT_COLUMNS =
   "id, business_name, owner_name, email, phone, tier, subscription_status, subscription_expiry, approval_status, requested_tier, billing_cycle, approved_at, deletion_scheduled_at, address, logo, currency, tax_rate, created_at, updated_at";
 const STAFF_SELECT_COLUMNS =
@@ -130,7 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               const staff = mapSupabaseStaff(cloudStaff);
               const { data: cloudOutlet } = await supabase
                 .from("outlets")
-                .select("*")
+                .select("id, merchant_id, name, address, phone, outlet_code, logo, currency, tax_rate, is_active, tax_enabled, receipt_footer, created_at, updated_at")
                 .eq("id", staff.outletId)
                 .eq("is_active", true)
                 .maybeSingle();
@@ -143,7 +157,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 await hydrateOutletData(outlet.id);
                 setOutletSession({ outlet, staff });
                 setIsLoading(false);
-                await syncPendingData();
+                localStorage.setItem(
+                  `${OFFLINE_STAFF_LEASE_PREFIX}${staff.id}`,
+                  new Date().toISOString(),
+                );
+                await syncPendingDataForOutlet(outlet.id);
+                return;
+              }
+            }
+
+            // An already-authenticated terminal may resume its cached outlet
+            // for up to 48 hours without connectivity. The cached staff ID
+            // must match the persisted Supabase session subject; no stored
+            // password or PIN is used as an offline credential.
+            if (!navigator.onLine) {
+              const cachedStaff = await db.staff.get(uid);
+              const leaseRaw = localStorage.getItem(
+                `${OFFLINE_STAFF_LEASE_PREFIX}${uid}`,
+              );
+              const leaseAt = leaseRaw ? Date.parse(leaseRaw) : Number.NaN;
+              const cachedOutlet = cachedStaff
+                ? await db.outlets.get(cachedStaff.outletId)
+                : null;
+              if (
+                cachedStaff?.isActive &&
+                cachedOutlet?.isActive &&
+                Number.isFinite(leaseAt) &&
+                Date.now() - leaseAt >= 0 &&
+                Date.now() - leaseAt <= OFFLINE_STAFF_LEASE_MS
+              ) {
+                setOutletSession({ outlet: cachedOutlet, staff: cachedStaff });
+                setIsLoading(false);
+                await syncPendingDataForOutlet(cachedOutlet.id);
                 return;
               }
             }
@@ -163,6 +208,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (merchant) {
               try {
                 assertMerchantAccess(merchant);
+                merchant = await loadEffectiveSubscription(merchant);
               } catch {
                 await supabase.auth.signOut().catch(() => {});
                 await db.clearCachedData();
@@ -253,6 +299,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       assertMerchantAccess(merchant);
+      merchant = await loadEffectiveSubscription(merchant);
     } catch (error) {
       await supabase.auth.signOut().catch(() => {});
       throw error;
@@ -379,7 +426,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       approvalStatus: "pending",
       requestedTier: data.tier,
       billingCycle: data.billingCycle,
-      currency: "NGN",
+      currency: "IDR",
       taxRate: 7.5,
       createdAt: now,
       updatedAt: now,
@@ -443,6 +490,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       JSON.stringify({ merchantId: updated.id }),
     );
   };
+
+  const refreshMerchantSubscription = useCallback(async () => {
+    if (!merchantSession || !isConfigured) return;
+    const merchant = await loadEffectiveSubscription(merchantSession.merchant);
+    await db.merchants.put(merchant);
+    setMerchantSession({ merchant });
+  }, [merchantSession]);
 
   // ============================================================
   // STAFF AUTH (PIN-based Terminal Login)
@@ -576,15 +630,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!outlet && isConfigured) {
       const { data: cloudOutlet } = await supabase
         .from("outlets")
-        .select("*")
+        .select("id, merchant_id, name, address, phone, outlet_code, logo, currency, tax_rate, is_active, tax_enabled, receipt_footer, created_at, updated_at")
         .eq("id", boundOutletId)
         .maybeSingle();
 
       if (cloudOutlet) {
         outlet = {
           id: cloudOutlet.id,
-          merchantId: cloudOutlet.merchant_id || cloudOutlet.merchantId,
-          outletCode: cloudOutlet.outlet_code || cloudOutlet.outletCode,
+          merchantId: cloudOutlet.merchant_id,
+          outletCode: cloudOutlet.outlet_code,
           name: cloudOutlet.name,
           address: cloudOutlet.address,
           phone: cloudOutlet.phone ?? "",
@@ -592,12 +646,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           pin: "",
           currency: cloudOutlet.currency || undefined,
           taxRate: Number(cloudOutlet.tax_rate ?? 7.5),
-          isActive: cloudOutlet.is_active ?? cloudOutlet.isActive ?? true,
-          taxEnabled: cloudOutlet.tax_enabled ?? cloudOutlet.taxEnabled ?? true,
-          receiptFooter:
-            cloudOutlet.receipt_footer ?? cloudOutlet.receiptFooter ?? "",
-          createdAt: cloudOutlet.created_at || cloudOutlet.createdAt,
-          updatedAt: cloudOutlet.updated_at || cloudOutlet.updatedAt,
+          isActive: cloudOutlet.is_active ?? true,
+          taxEnabled: cloudOutlet.tax_enabled ?? true,
+          receiptFooter: cloudOutlet.receipt_footer ?? "",
+          createdAt: cloudOutlet.created_at,
+          updatedAt: cloudOutlet.updated_at,
           syncStatus: "synced",
         } as Outlet;
         await db.outlets.put(outlet);
@@ -637,17 +690,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     sessionStorage.setItem(OUTLET_SESSION_KEY, sessionPayload);
+    localStorage.setItem(
+      `${OFFLINE_STAFF_LEASE_PREFIX}${staff.id}`,
+      new Date().toISOString(),
+    );
     setOutletSession(session);
+    void syncPendingDataForOutlet(outlet.id);
 
     return session;
   };
 
   const logoutOutlet = async () => {
+    const staffId = outletSession?.staff?.id;
     if (isConfigured) {
       await supabase.auth.signOut().catch(() => {});
     }
     setOutletSession(null);
     sessionStorage.removeItem(OUTLET_SESSION_KEY);
+    if (staffId)
+      localStorage.removeItem(`${OFFLINE_STAFF_LEASE_PREFIX}${staffId}`);
     await db.clearCachedData();
   };
 
@@ -666,6 +727,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         registerMerchant,
         createStaff,
         updateMerchant,
+        refreshMerchantSubscription,
         isLoading,
       }}
     >
@@ -703,7 +765,7 @@ function mapSupabaseMerchant(row: Record<string, any>): Merchant {
     deletionScheduledAt: row.deletion_scheduled_at ?? undefined,
     address: row.address,
     logo: row.logo ?? undefined,
-    currency: row.currency ?? "NGN",
+    currency: row.currency ?? "IDR",
     taxRate: row.tax_rate ?? 7.5,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -717,12 +779,39 @@ function assertMerchantAccess(merchant: Merchant) {
       "Your merchant account is awaiting administrator approval.",
     );
   }
-  if (
-    merchant.subscriptionStatus === "expired" ||
-    new Date(merchant.subscriptionExpiry).getTime() <= Date.now()
-  ) {
-    throw new Error("Your subscription has expired. Contact support to renew.");
+}
+
+async function loadEffectiveSubscription(merchant: Merchant): Promise<Merchant> {
+  const { data, error } = await supabase
+    .from("subscriptions")
+    .select("plan_code, billing_cycle, status, expires_at")
+    .eq("tenant_id", merchant.id)
+    .in("status", ["active", "trial"])
+    .lte("starts_at", new Date().toISOString())
+    .gt("expires_at", new Date().toISOString())
+    .order("starts_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) {
+    return { ...merchant, subscriptionStatus: "expired" };
   }
+
+  return {
+    ...merchant,
+    tier: legacyPlanToMerchantTier(data.plan_code),
+    billingCycle: data.billing_cycle as BillingCycle,
+    subscriptionStatus: data.status as Merchant["subscriptionStatus"],
+    subscriptionExpiry: data.expires_at,
+  };
+}
+
+function legacyPlanToMerchantTier(planCode: string): MerchantTier {
+  if (planCode === "legacy_basic") return "basic";
+  if (planCode === "legacy_standard") return "standard";
+  if (planCode === "legacy_premium") return "premium";
+  return planCode as MerchantTier;
 }
 
 function mapSupabaseStaff(row: Record<string, any>): Staff {
@@ -795,18 +884,30 @@ async function hydrateOutletData(outletId: string) {
       db.stockMovements,
     ],
     async () => {
+      const cachedProducts = await db.products
+        .where("outletId")
+        .equals(outletId)
+        .toArray();
       await db.categories.bulkPut(
-        (categories.data ?? []).map((row: any) => ({
+        [
+          ...(categories.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           name: row.name,
           color: row.color,
           createdAt: row.created_at,
           syncStatus: "synced" as const,
-        })),
+          })),
+          ...(await db.categories
+            .where("outletId")
+            .equals(outletId)
+            .filter((record) => record.syncStatus === "pending")
+            .toArray()),
+        ],
       );
-      await db.products.bulkPut(
-        (products.data ?? []).map((row: any) => ({
+      const cloudProductIds = new Set((products.data ?? []).map((row: any) => row.id));
+      await db.products.bulkPut([
+        ...(products.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           categoryId: row.category_id ?? undefined,
@@ -826,21 +927,19 @@ async function hydrateOutletData(outletId: string) {
           updatedAt: row.updated_at,
           syncStatus: "synced" as const,
         })),
-      );
-      const cloudProductIds = new Set(
-        (products.data ?? []).map((row: any) => row.id),
-      );
-      const cachedProducts = await db.products
-        .where("outletId")
-        .equals(outletId)
-        .toArray();
+        ...cachedProducts.filter((product) => product.syncStatus === "pending"),
+      ]);
       await db.products.bulkDelete(
         cachedProducts
-          .filter((product) => !cloudProductIds.has(product.id))
+          .filter(
+            (product) =>
+              !cloudProductIds.has(product.id) && product.syncStatus !== "pending",
+          )
           .map((product) => product.id),
       );
       await db.customers.bulkPut(
-        (customers.data ?? []).map((row: any) => ({
+        [
+          ...(customers.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           name: row.name,
@@ -853,10 +952,22 @@ async function hydrateOutletData(outletId: string) {
           createdAt: row.created_at,
           updatedAt: row.updated_at,
           syncStatus: "synced" as const,
-        })),
+          })),
+          ...(await db.customers
+            .where("outletId")
+            .equals(outletId)
+            .filter((record) => record.syncStatus === "pending")
+            .toArray()),
+        ],
       );
+      const cachedSales = await db.sales
+        .where("outletId")
+        .equals(outletId)
+        .toArray();
+      const cloudSaleIds = new Set((sales.data ?? []).map((row: any) => row.id));
       await db.sales.bulkPut(
-        (sales.data ?? []).map((row: any) => ({
+        [
+          ...(sales.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           receiptNumber: row.receipt_number,
@@ -875,11 +986,19 @@ async function hydrateOutletData(outletId: string) {
           staffName: row.staff_name ?? undefined,
           note: row.note ?? undefined,
           createdAt: row.created_at,
+          wasOffline: Boolean(row.was_offline),
+          syncError: cachedSales.find((sale) => sale.id === row.id)?.syncError,
           syncStatus: "synced" as const,
-        })),
+          })),
+          ...cachedSales.filter(
+            (sale) =>
+              sale.syncStatus === "pending" && !cloudSaleIds.has(sale.id),
+          ),
+        ],
       );
       await db.expenses.bulkPut(
-        (expenses.data ?? []).map((row: any) => ({
+        [
+          ...(expenses.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           category: row.category,
@@ -889,10 +1008,17 @@ async function hydrateOutletData(outletId: string) {
           staffId: row.staff_id ?? undefined,
           createdAt: row.created_at,
           syncStatus: "synced" as const,
-        })),
+          })),
+          ...(await db.expenses
+            .where("outletId")
+            .equals(outletId)
+            .filter((record) => record.syncStatus === "pending")
+            .toArray()),
+        ],
       );
       await db.stockMovements.bulkPut(
-        (movements.data ?? []).map((row: any) => ({
+        [
+          ...(movements.data ?? []).map((row: any) => ({
           id: row.id,
           outletId: row.outlet_id,
           productId: row.product_id,
@@ -905,7 +1031,13 @@ async function hydrateOutletData(outletId: string) {
           saleId: row.sale_id ?? undefined,
           createdAt: row.created_at,
           syncStatus: "synced" as const,
-        })),
+          })),
+          ...(await db.stockMovements
+            .where("outletId")
+            .equals(outletId)
+            .filter((record) => record.syncStatus === "pending")
+            .toArray()),
+        ],
       );
     },
   );

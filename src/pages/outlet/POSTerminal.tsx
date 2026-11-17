@@ -784,23 +784,40 @@ import { useAuth } from "@/contexts/AuthContext";
 import { usePOS } from "@/contexts/POSContext";
 import { db } from "@/db/database";
 import { getSupabaseConfigStatus, supabase } from "@/lib/supabase";
+import { syncPendingDataForOutlet } from "@/lib/sync";
 import Button from "@/components/ui/Button.tsx";
 import Modal from "@/components/ui/Modal.tsx";
 import Badge from "@/components/ui/Badge.tsx";
 import { useToast } from "@/components/ui/Toast.tsx";
-import { formatCurrency, clsx } from "@/utils/helpers";
+import { formatCurrency, formatDate, clsx } from "@/utils/helpers";
 import type { Product, Category, Customer, PaymentMethod } from "@/types";
 
 /* ==========================================================================
    WEB BLUETOOTH TYPES & AMBIENT EXTENSIONS
    ========================================================================== */
 declare global {
+  interface Window {
+    electron?: {
+      printing: {
+        getPrinters(): Promise<ReceiptPrinter[]>;
+        print(printerName?: string): Promise<{ success: boolean; error?: string }>;
+        sendNetworkReceipt(host: string, port: number, data: Uint8Array): Promise<{ success: boolean }>;
+      };
+    };
+  }
+
   interface Navigator {
     bluetooth?: {
       requestDevice(options?: Record<string, any>): Promise<any>;
     };
   }
 }
+
+type ReceiptPrinter = {
+  name: string;
+  displayName: string;
+  description: string;
+};
 
 type BluetoothRemoteGATTCharacteristic = any;
 
@@ -816,12 +833,18 @@ type BluetoothRemoteGATTCharacteristic = any;
  * (e.g. Chinese, Arabic, Cyrillic), extend this byte encoder function using an
  * external ESC/POS library like `esc-pos-encoder` or `@node-escpos/core`.
  */
-function generateEscPosBuffer(sale: any, outlet: any): Uint8Array {
+function generateEscPosBuffer(sale: any, outlet: any, lineWidth = 42): Uint8Array {
   const encoder = new TextEncoder();
   const parts: Uint8Array[] = [];
 
   const addStr = (str: string) => parts.push(encoder.encode(str));
   const addBytes = (bytes: number[]) => parts.push(new Uint8Array(bytes));
+  const addWrapped = (value: string, width = lineWidth) => {
+    const characters = Array.from(value);
+    for (let index = 0; index < characters.length; index += width) {
+      addStr(`${characters.slice(index, index + width).join("")}\n`);
+    }
+  };
 
   // ESC/POS Command Byte Constants
   const INIT = [0x1b, 0x40];
@@ -841,45 +864,52 @@ function generateEscPosBuffer(sale: any, outlet: any): Uint8Array {
   addBytes(ALIGN_CENTER);
   addBytes(DOUBLE_SIZE);
   addBytes(BOLD_ON);
-  addStr(`${outlet.name}\n`);
+  addWrapped(outlet.name, Math.floor(lineWidth / 2));
   addBytes(NORMAL_SIZE);
   addBytes(BOLD_OFF);
-  addStr(`${outlet.address}\n`);
+  addWrapped(outlet.address);
+  if (outlet.phone) addStr(`${outlet.phone}\n`);
   addStr("Sale Receipt\n");
   addStr(`${sale.receiptNumber}\n`);
-  addStr("--------------------------------\n");
+  addStr(`${formatDate(sale.createdAt)}\n`);
+  if (sale.staffName) addWrapped(`Cashier: ${sale.staffName}`);
+  if (sale.customerName) addWrapped(`Customer: ${sale.customerName}`);
+  addStr(`${"-".repeat(lineWidth)}\n`);
 
   // 3. Item List
   addBytes(ALIGN_LEFT);
   sale.items.forEach((item: any) => {
-    addStr(`${item.productName} x${item.qty}\n`);
+    addWrapped(`${item.productName} x${item.qty}`);
+    addStr(`  ${formatCurrency(item.unitPrice, outlet.currency ?? "IDR")} each\n`);
+    if (item.discount > 0) addStr(`  Item discount ${item.discount}%\n`);
     addBytes(ALIGN_RIGHT);
-    addStr(`${formatCurrency(item.total, outlet.currency ?? "NGN")}\n`);
+    addStr(`${formatCurrency(item.total, outlet.currency ?? "IDR")}\n`);
     addBytes(ALIGN_LEFT);
   });
-  addStr("--------------------------------\n");
+  addStr(`${"-".repeat(lineWidth)}\n`);
 
   // 4. Financial Totals
+  addStr(`Subtotal: ${formatCurrency(sale.subtotal, outlet.currency ?? "IDR")}\n`);
   if (sale.discountAmount > 0) {
     addStr(
-      `Discount: -${formatCurrency(sale.discountAmount, outlet.currency ?? "NGN")}\n`,
+      `Discount: -${formatCurrency(sale.discountAmount, outlet.currency ?? "IDR")}\n`,
     );
   }
-  addStr(`Tax: ${formatCurrency(sale.taxAmount, outlet.currency ?? "NGN")}\n`);
+  addStr(`Tax: ${formatCurrency(sale.taxAmount, outlet.currency ?? "IDR")}\n`);
   addBytes(BOLD_ON);
-  addStr(`TOTAL: ${formatCurrency(sale.total, outlet.currency ?? "NGN")}\n`);
+  addStr(`TOTAL: ${formatCurrency(sale.total, outlet.currency ?? "IDR")}\n`);
   addBytes(BOLD_OFF);
-
-  if (sale.paymentMethod === "cash" && sale.change > 0) {
-    addStr(
-      `Change: ${formatCurrency(sale.change, outlet.currency ?? "NGN")}\n`,
-    );
-  }
+  addStr(`Payment: ${String(sale.paymentMethod).toUpperCase()}\n`);
+  addStr(`Paid: ${formatCurrency(sale.amountPaid, outlet.currency ?? "IDR")}\n`);
+  if (sale.change > 0) addStr(`Change: ${formatCurrency(sale.change, outlet.currency ?? "IDR")}\n`);
+  if (sale.syncStatus === "pending") addStr("OFFLINE - PENDING SYNC\n");
+  if (sale.syncError) addWrapped(`REVIEW: ${sale.syncError}`);
 
   // 5. Receipt Footer & Paper Cut Command
-  addStr("--------------------------------\n");
+  addStr(`${"-".repeat(lineWidth)}\n`);
   addBytes(ALIGN_CENTER);
-  addStr(`${outlet.receiptFooter || "Thank you for your patronage!"}\n\n\n`);
+  addWrapped(outlet.receiptFooter || "Thank you for your patronage!");
+  addStr("\n\n");
   addBytes(CUT_PAPER);
 
   // Merge byte arrays into a single contiguous Uint8Array
@@ -908,7 +938,7 @@ export default function POSTerminal() {
   const { outletSession } = useAuth();
   const outlet = outletSession!.outlet;
   const staff = outletSession!.staff;
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
   const { success, error: showError } = useToast();
   const pos = usePOS();
 
@@ -924,6 +954,9 @@ export default function POSTerminal() {
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerSearch, setCustomerSearch] = useState("");
   const [processing, setProcessing] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [pendingSaleCount, setPendingSaleCount] = useState(0);
+  const [saleReviewCount, setSaleReviewCount] = useState(0);
 
   // Responsive state: Controls mobile cart drawer open/close
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
@@ -934,54 +967,91 @@ export default function POSTerminal() {
   const [printType, setPrintType] = useState<
     "system" | "bluetooth" | "network"
   >("system");
-  const [networkPrinterIp, setNetworkPrinterIp] = useState<string>(
-    localStorage.getItem("pos_network_printer_url") ||
-      "http://192.168.1.100:8080/print",
+  const isElectron = Boolean(window.electron?.printing);
+  const [printers, setPrinters] = useState<ReceiptPrinter[]>([]);
+  const [selectedPrinter, setSelectedPrinter] = useState(
+    localStorage.getItem("pos_receipt_printer") || "",
+  );
+  const [networkPrinterIp, setNetworkPrinterIp] = useState(
+    localStorage.getItem("pos_network_printer_host") || "192.168.1.100",
+  );
+  const [browserPrintBridge, setBrowserPrintBridge] = useState(
+    localStorage.getItem("pos_network_printer_url") || "",
+  );
+  const [receiptPaperWidth, setReceiptPaperWidth] = useState<"58" | "80">(
+    localStorage.getItem("pos_receipt_paper_width") === "58" ? "58" : "80",
   );
   const [isPrinting, setIsPrinting] = useState(false);
+
+  useEffect(() => {
+    if (!showReceiptModal || !isElectron || !window.electron?.printing) return;
+    window.electron.printing.getPrinters().then((available) => {
+      setPrinters(available);
+    }).catch((err: unknown) => {
+      console.warn("Unable to read installed printers", err);
+    });
+  }, [isElectron, showReceiptModal]);
 
   useEffect(() => {
     const load = async () => {
       const { isConfigured } = getSupabaseConfigStatus();
       let prods: Product[];
       if (isConfigured) {
-        const { data, error } = await supabase
-          .from("products")
-          .select("*")
-          .eq("outlet_id", outlet.id)
-          .eq("is_active", true);
-        if (error) throw error;
-        prods = (data ?? []).map((row: any) => ({
-          id: row.id,
-          outletId: row.outlet_id,
-          categoryId: row.category_id ?? undefined,
-          name: row.name,
-          sku: row.sku,
-          barcode: row.barcode ?? undefined,
-          description: row.description ?? undefined,
-          price: Number(row.price),
-          costPrice: Number(row.cost_price),
-          stock: Number(row.stock),
-          lowStockAlert: Number(row.low_stock_alert),
-          unit: row.unit,
-          image: row.image ?? undefined,
-          isActive: row.is_active,
-          trackStock: row.track_stock,
-          createdAt: row.created_at,
-          updatedAt: row.updated_at,
-          syncStatus: "synced" as const,
-        }));
-        const cloudProductIds = new Set(prods.map((product) => product.id));
         const cachedProducts = await db.products
           .where("outletId")
           .equals(outlet.id)
           .toArray();
-        await db.products.bulkDelete(
-          cachedProducts
-            .filter((product) => !cloudProductIds.has(product.id))
-            .map((product) => product.id),
-        );
-        await db.products.bulkPut(prods);
+        try {
+          if (navigator.onLine) await syncPendingDataForOutlet(outlet.id);
+          const { data, error } = await supabase
+            .from("products")
+            .select("*")
+            .eq("outlet_id", outlet.id)
+            .eq("is_active", true);
+          if (error) throw error;
+          prods = (data ?? []).map((row: any) => ({
+            id: row.id,
+            outletId: row.outlet_id,
+            categoryId: row.category_id ?? undefined,
+            name: row.name,
+            sku: row.sku,
+            barcode: row.barcode ?? undefined,
+            description: row.description ?? undefined,
+            price: Number(row.price),
+            costPrice: Number(row.cost_price),
+            stock: Number(row.stock),
+            lowStockAlert: Number(row.low_stock_alert),
+            unit: row.unit,
+            image: row.image ?? undefined,
+            isActive: row.is_active,
+            trackStock: row.track_stock,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            syncStatus: "synced" as const,
+          }));
+          const cloudProductIds = new Set(prods.map((product) => product.id));
+          const localPending = cachedProducts.filter(
+            (product) => product.syncStatus === "pending",
+          );
+          for (const pendingProduct of localPending) {
+            const index = prods.findIndex((product) => product.id === pendingProduct.id);
+            if (index >= 0) prods[index] = pendingProduct;
+            else prods.push(pendingProduct);
+          }
+          await db.products.bulkPut(prods);
+          await db.products.bulkDelete(
+            cachedProducts
+              .filter(
+                (product) =>
+                  !cloudProductIds.has(product.id) &&
+                  product.syncStatus !== "pending",
+              )
+              .map((product) => product.id),
+          );
+        } catch (error) {
+          console.warn("Using the cached product catalog:", error);
+          prods = cachedProducts.filter((product) => product.isActive);
+        }
       } else {
         prods = await db.products
           .where("outletId")
@@ -1005,6 +1075,52 @@ export default function POSTerminal() {
   useEffect(() => {
     pos.setTaxRate(outlet.taxEnabled ? (outlet.taxRate ?? 7.5) : 0);
   }, [outlet.taxEnabled, outlet.taxRate]);
+
+  useEffect(() => {
+    let active = true;
+    const updateQueueState = async () => {
+      const [pending, review] = await Promise.all([
+        db.sales
+          .where("[outletId+syncStatus]")
+          .equals([outlet.id, "pending"])
+          .count(),
+        db.sales
+          .where("outletId")
+          .equals(outlet.id)
+          .filter((sale) => Boolean(sale.syncError))
+          .count(),
+      ]);
+      if (active) {
+        setPendingSaleCount(pending);
+        setSaleReviewCount(review);
+      }
+    };
+    const refreshAndSync = async () => {
+      setIsOnline(navigator.onLine);
+      if (navigator.onLine && getSupabaseConfigStatus().isConfigured) {
+        await syncPendingDataForOutlet(outlet.id);
+        const cachedProducts = await db.products
+          .where("outletId")
+          .equals(outlet.id)
+          .filter((product) => product.isActive)
+          .toArray();
+        if (active) setProducts(cachedProducts);
+      }
+      await updateQueueState();
+    };
+    const handleOnline = () => void refreshAndSync();
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    const timer = window.setInterval(() => void refreshAndSync(), 15_000);
+    void updateQueueState();
+    return () => {
+      active = false;
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      window.clearInterval(timer);
+    };
+  }, [outlet.id]);
 
   const filtered = products.filter((p) => {
     const q = search.toLowerCase();
@@ -1041,17 +1157,41 @@ export default function POSTerminal() {
     }
     setProcessing(true);
     try {
-      await pos.completeSale(
+      const completedSale = await pos.completeSale(
         outlet.id,
         payMethod,
         paid,
         staff?.id,
         staff?.name,
       );
+      setProducts(
+        await db.products
+          .where("outletId")
+          .equals(outlet.id)
+          .filter((product) => product.isActive)
+          .toArray(),
+      );
+      const [pending, review] = await Promise.all([
+        db.sales
+          .where("[outletId+syncStatus]")
+          .equals([outlet.id, "pending"])
+          .count(),
+        db.sales
+          .where("outletId")
+          .equals(outlet.id)
+          .filter((sale) => Boolean(sale.syncError))
+          .count(),
+      ]);
+      setPendingSaleCount(pending);
+      setSaleReviewCount(review);
       setShowPayModal(false);
       setShowReceiptModal(true);
       setIsMobileCartOpen(false);
-      success("Sale completed!");
+      success(
+        completedSale.syncStatus === "pending"
+          ? "Sale saved offline and queued to sync."
+          : "Sale completed!",
+      );
     } catch (err: any) {
       showError(err.message);
     } finally {
@@ -1075,6 +1215,16 @@ export default function POSTerminal() {
    * and writes byte chunks to the serial characteristic.
    */
   const handleBluetoothPrint = async () => {
+    // In Electron, pair Bluetooth printers with the operating system first;
+    // they then appear in the installed printer list and use the native spooler.
+    if (isElectron) {
+      if (!selectedPrinter) {
+        showError("Pair the Bluetooth printer in your operating system, then select it from Installed printer.");
+        return;
+      }
+      await handleSystemPrint();
+      return;
+    }
     if (!navigator.bluetooth) {
       showError("Web Bluetooth is not supported on this browser/device.");
       return;
@@ -1119,12 +1269,20 @@ export default function POSTerminal() {
         throw new Error("No writable printing characteristic found on device.");
       }
 
-      // Generate binary buffer and send in chunks
-      const data = generateEscPosBuffer(pos.lastSale, outlet);
-      const chunkSize = 512; // Transmit in safe 512-byte chunks
+      // BLE characteristics commonly accept at most 20 bytes per write.
+      const data = generateEscPosBuffer(
+        pos.lastSale,
+        outlet,
+        receiptPaperWidth === "58" ? 32 : 42,
+      );
+      const chunkSize = 20;
       for (let i = 0; i < data.length; i += chunkSize) {
         const chunk = data.slice(i, i + chunkSize);
-        await printCharacteristic.writeValue(chunk);
+        if (printCharacteristic.writeValueWithoutResponse) {
+          await printCharacteristic.writeValueWithoutResponse(chunk);
+        } else {
+          await printCharacteristic.writeValue(chunk);
+        }
       }
 
       success("Receipt printed successfully via Bluetooth!");
@@ -1148,35 +1306,41 @@ export default function POSTerminal() {
       return;
     }
 
-    const targetUrl = prompt(
-      "Enter Wireless Thermal Printer LAN IP or Print Agent Endpoint:",
-      networkPrinterIp,
-    );
-
-    if (!targetUrl) return;
-
-    setNetworkPrinterIp(targetUrl);
-    localStorage.setItem("pos_network_printer_url", targetUrl);
     setIsPrinting(true);
 
     try {
-      const data = generateEscPosBuffer(pos.lastSale, outlet);
-
-      // POST raw ESC/POS payload as an ArrayBuffer to LAN print agent
-      const response = await fetch(targetUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: data.buffer as BodyInit,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Printer bridge returned status ${response.status}`);
+      const data = generateEscPosBuffer(
+        pos.lastSale,
+        outlet,
+        receiptPaperWidth === "58" ? 32 : 42,
+      );
+      if (isElectron && window.electron?.printing) {
+        localStorage.setItem("pos_network_printer_host", networkPrinterIp.trim());
+        await window.electron.printing.sendNetworkReceipt(
+          networkPrinterIp.trim(),
+          9100,
+          data,
+        );
+      } else {
+        const targetUrl = browserPrintBridge.trim();
+        if (!/^https?:\/\//i.test(targetUrl)) {
+          throw new Error("Enter the URL of a compatible local HTTP print bridge.");
+        }
+        localStorage.setItem("pos_network_printer_url", targetUrl);
+        const response = await fetch(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: data.buffer as BodyInit,
+        });
+        if (!response.ok) {
+          throw new Error(`Print bridge returned status ${response.status}`);
+        }
       }
 
       success("Receipt sent to Network Printer!");
     } catch (err: any) {
       showError(
-        `Wireless print failed: ${err.message}. Check IP or Local Print Agent.`,
+        `Wireless print failed: ${err.message}. Check printer IP, port, and connection.`,
       );
     } finally {
       setIsPrinting(false);
@@ -1187,14 +1351,39 @@ export default function POSTerminal() {
    * Master Print Trigger Dispatcher.
    * Routes the print action based on the cashier's active selection.
    */
+  const handleSystemPrint = async () => {
+    if (!pos.lastSale) {
+      showError("No sale receipt available to print.");
+      return;
+    }
+    document.documentElement.dataset.printReceipt = "true";
+    document.documentElement.dataset.receiptWidth = receiptPaperWidth;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    setIsPrinting(true);
+    try {
+      if (isElectron && window.electron?.printing) {
+        const result = await window.electron.printing.print(selectedPrinter || undefined);
+        if (!result.success) throw new Error(result.error || "The print job was not accepted.");
+      } else {
+        window.print();
+      }
+      success("Receipt sent to the printer.");
+    } catch (err: any) {
+      showError(`Receipt printing failed: ${err.message}`);
+    } finally {
+      delete document.documentElement.dataset.printReceipt;
+      delete document.documentElement.dataset.receiptWidth;
+      setIsPrinting(false);
+    }
+  };
+
   const handlePrint = () => {
     if (printType === "bluetooth") {
-      handleBluetoothPrint();
+      void handleBluetoothPrint();
     } else if (printType === "network") {
-      handleNetworkPrint();
+      void handleNetworkPrint();
     } else {
-      // Standard OS Dialog / Driver / AirPrint Print Fallback
-      window.print();
+      void handleSystemPrint();
     }
   };
 
@@ -1207,24 +1396,78 @@ export default function POSTerminal() {
       */}
       <style>{`
         @media print {
-          body * {
-            visibility: hidden !important;
-          }
-          #receipt-content, #receipt-content * {
-            visibility: visible !important;
-          }
-          #receipt-content {
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 80mm !important; /* Standard Thermal Receipt Width */
+          @page { margin: 0; }
+          html, body, #root {
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
             margin: 0 !important;
-            padding: 10px !important;
-            background: #ffffff !important;
-            color: #000000 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            background: #fff !important;
           }
+          body * {
+            overflow: visible !important;
+            max-height: none !important;
+          }
+          body * { visibility: hidden !important; }
+          #receipt-content, #receipt-content * { visibility: visible !important; }
+          #receipt-content {
+            position: fixed !important;
+            inset: 0 auto auto 0 !important;
+            display: block !important;
+            width: 72mm !important;
+            max-width: 72mm !important;
+            margin: 0 !important;
+            padding: 3mm !important;
+            box-sizing: border-box !important;
+            overflow: visible !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            background: #fff !important;
+            color: #000 !important;
+            font: 10pt/1.3 Arial, sans-serif !important;
+            box-shadow: none !important;
+          }
+          html[data-receipt-width="58"] #receipt-content {
+            width: 48mm !important;
+            max-width: 48mm !important;
+          }
+          #receipt-content * {
+            color: #000 !important;
+            background-color: transparent !important;
+            border-color: #aaa !important;
+            box-shadow: none !important;
+            text-shadow: none !important;
+            overflow-wrap: anywhere !important;
+          }
+          #receipt-content img { max-width: 36mm !important; max-height: 18mm !important; }
+          #receipt-content .receipt-line { break-inside: avoid; }
         }
       `}</style>
+
+      {(!isOnline || pendingSaleCount > 0 || saleReviewCount > 0) && (
+        <div className="absolute top-2 right-2 z-30 max-w-[min(94vw,32rem)] rounded-lg border border-amber-500/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100 shadow-lg">
+          {!isOnline ? (
+            <span>Offline. New sales are saved on this terminal and queued.</span>
+          ) : pendingSaleCount > 0 ? (
+            <span>{pendingSaleCount} sale(s) waiting to sync.</span>
+          ) : null}
+          {saleReviewCount > 0 && (
+            <span className="ml-2">
+              {saleReviewCount} sale(s) need total or sync review.
+            </span>
+          )}
+          {isOnline && pendingSaleCount > 0 && (
+            <button
+              className="ml-2 underline"
+              onClick={() => void syncPendingDataForOutlet(outlet.id)}
+            >
+              Retry sync
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Product Grid Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -1708,6 +1951,42 @@ export default function POSTerminal() {
         size="sm"
         footer={
           <div className="flex flex-col gap-3 w-full">
+            <label className="flex items-center justify-between gap-3 text-xs text-pos-muted">
+              <span>Thermal paper width</span>
+              <select
+                value={receiptPaperWidth}
+                onChange={(event) => {
+                  const width = event.target.value === "58" ? "58" : "80";
+                  setReceiptPaperWidth(width);
+                  localStorage.setItem("pos_receipt_paper_width", width);
+                }}
+                className="rounded-lg border border-pos-border bg-pos-input px-3 py-2 text-sm text-pos-text"
+              >
+                <option value="58">58 mm</option>
+                <option value="80">80 mm</option>
+              </select>
+            </label>
+            {isElectron && (
+              <label className="space-y-1 text-xs text-pos-muted">
+                <span>Installed printer (USB, paired Bluetooth, or Wi-Fi)</span>
+                <select
+                  value={selectedPrinter}
+                  onChange={(event) => {
+                    setSelectedPrinter(event.target.value);
+                    localStorage.setItem("pos_receipt_printer", event.target.value);
+                    if (event.target.value) setPrintType("system");
+                  }}
+                  className="w-full rounded-lg border border-pos-border bg-pos-input px-3 py-2 text-sm text-pos-text"
+                >
+                  <option value="">Use operating system print dialog</option>
+                  {printers.map((printer) => (
+                    <option key={printer.name} value={printer.name}>
+                      {printer.displayName || printer.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {/* PRINTER HARDWARE MODE SELECTOR */}
             <div className="grid grid-cols-3 gap-1.5 p-1 bg-pos-bg rounded-lg border border-pos-border">
               <button
@@ -1730,7 +2009,9 @@ export default function POSTerminal() {
                     ? "bg-blue-600 text-white shadow-sm"
                     : "text-pos-muted hover:text-pos-text",
                 )}
-                title="Connect directly via Web Bluetooth ESC/POS"
+                title={isElectron
+                  ? "Use a Bluetooth printer paired and installed in your operating system"
+                  : "Connect to a Bluetooth Low Energy printer that exposes writable GATT"}
               >
                 <Bluetooth size={13} /> Bluetooth
               </button>
@@ -1747,6 +2028,41 @@ export default function POSTerminal() {
                 <Wifi size={13} /> Wireless
               </button>
             </div>
+
+            {printType === "network" && (
+              <div className="space-y-2 rounded-lg border border-pos-border bg-pos-bg p-3">
+                {isElectron ? (
+                  <>
+                    <p className="text-xs text-pos-muted">
+                      Sends raw ESC/POS to a LAN printer on standard port 9100.
+                    </p>
+                    <div className="grid grid-cols-[1fr_auto] items-center gap-2">
+                      <input
+                        aria-label="Network printer IPv4 address"
+                        value={networkPrinterIp}
+                        onChange={(event) => setNetworkPrinterIp(event.target.value)}
+                        placeholder="192.168.1.100"
+                        className="min-w-0 rounded-lg border border-pos-border bg-pos-input px-3 py-2 text-sm text-pos-text"
+                      />
+                      <span className="text-xs text-pos-muted">:9100</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs text-pos-muted">
+                      Browser printing requires a compatible local HTTP print bridge.
+                    </p>
+                    <input
+                      aria-label="Local HTTP print bridge URL"
+                      value={browserPrintBridge}
+                      onChange={(event) => setBrowserPrintBridge(event.target.value)}
+                      placeholder="http://localhost:8080/print"
+                      className="w-full rounded-lg border border-pos-border bg-pos-input px-3 py-2 text-sm text-pos-text"
+                    />
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="flex gap-3">
               <Button
@@ -1792,10 +2108,24 @@ export default function POSTerminal() {
 
               <p className="font-bold text-pos-text text-lg">{outlet.name}</p>
               <p className="text-xs text-pos-muted">{outlet.address}</p>
+              {outlet.phone && <p className="text-xs text-pos-muted">{outlet.phone}</p>}
               <p className="text-sm text-pos-muted">Sale Receipt</p>
               <p className="text-xs text-pos-muted font-mono mt-1">
                 {pos.lastSale.receiptNumber}
               </p>
+              <p className="text-xs text-pos-muted">{formatDate(pos.lastSale.createdAt)}</p>
+              {pos.lastSale.staffName && <p className="text-xs text-pos-muted">Cashier: {pos.lastSale.staffName}</p>}
+              {pos.lastSale.customerName && <p className="text-xs text-pos-muted">Customer: {pos.lastSale.customerName}</p>}
+              {pos.lastSale.syncStatus === "pending" && (
+                <p className="mt-1 text-xs font-semibold text-amber-500">
+                  Saved on this terminal · waiting to sync
+                </p>
+              )}
+              {pos.lastSale.syncError && (
+                <p className="mt-1 text-xs text-red-500">
+                  {pos.lastSale.syncError}
+                </p>
+              )}
             </div>
             <div className="bg-pos-bg rounded-xl p-4 space-y-2 text-sm">
               {pos.lastSale.items.map((item) => (
@@ -1809,6 +2139,10 @@ export default function POSTerminal() {
                 </div>
               ))}
               <div className="border-t border-pos-border pt-2 mt-2 space-y-1">
+                <div className="flex justify-between text-pos-muted">
+                  <span>Subtotal</span>
+                  <span>{formatCurrency(pos.lastSale.subtotal, outletCurrency)}</span>
+                </div>
                 {pos.lastSale.discountAmount > 0 && (
                   <div className="flex justify-between text-red-400">
                     <span>Discount</span>
@@ -1827,14 +2161,21 @@ export default function POSTerminal() {
                     {formatCurrency(pos.lastSale.taxAmount, outletCurrency)}
                   </span>
                 </div>
+                <div className="flex justify-between text-pos-muted">
+                  <span>Payment</span>
+                  <span className="capitalize">{pos.lastSale.paymentMethod}</span>
+                </div>
+                <div className="flex justify-between text-pos-muted">
+                  <span>Paid</span>
+                  <span>{formatCurrency(pos.lastSale.amountPaid, outletCurrency)}</span>
+                </div>
                 <div className="flex justify-between font-bold text-pos-text text-base">
                   <span>Total</span>
                   <span className="text-blue-400">
                     {formatCurrency(pos.lastSale.total, outletCurrency)}
                   </span>
                 </div>
-                {pos.lastSale.paymentMethod === "cash" &&
-                  pos.lastSale.change > 0 && (
+                {pos.lastSale.change > 0 && (
                     <div className="flex justify-between text-emerald-400 font-medium">
                       <span>Change</span>
                       <span>

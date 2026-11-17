@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Plus,
   Store,
@@ -22,7 +23,7 @@ import Modal from "@/components/ui/Modal";
 import Badge from "@/components/ui/Badge";
 import { useToast } from "@/components/ui/Toast";
 import { syncRecord } from "@/lib/sync";
-import { supabase } from "@/lib/supabase";
+import { getSupabaseConfigStatus, supabase } from "@/lib/supabase";
 import { generateId, formatDateShort } from "@/utils/helpers";
 import type { Outlet } from "@/types";
 import { TIER_LIMITS } from "@/types";
@@ -63,9 +64,14 @@ export default function OutletsPage() {
   const { merchantSession } = useAuth();
   const merchant = merchantSession?.merchant;
   const { success, error: showError } = useToast();
+  const navigate = useNavigate();
 
   // Local component state
   const [outlets, setOutlets] = useState<Outlet[]>([]);
+  const [serverActiveOutletCount, setServerActiveOutletCount] = useState<
+    number | null
+  >(null);
+  const [overageOutletSlots, setOverageOutletSlots] = useState(0);
   const [showModal, setShowModal] = useState(false);
   const [editingOutlet, setEditingOutlet] = useState<Outlet | null>(null);
   const [form, setForm] = useState<OutletForm>(defaultForm);
@@ -87,6 +93,44 @@ export default function OutletsPage() {
       .equals(merchant.id)
       .toArray();
     setOutlets(data);
+
+    if (!getSupabaseConfigStatus().isConfigured) {
+      setServerActiveOutletCount(null);
+      setOverageOutletSlots(0);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const [outletResult, overageResult] = await Promise.all([
+      supabase
+        .from("outlets")
+        .select("id", { count: "exact", head: true })
+        .eq("merchant_id", merchant.id)
+        .eq("is_active", true),
+      supabase
+        .from("outlet_overage_entitlements")
+        .select("outlet_quantity")
+        .eq("tenant_id", merchant.id)
+        .lte("starts_at", now)
+        .gt("expires_at", now),
+    ]);
+    if (outletResult.error || overageResult.error) {
+      showError(
+        outletResult.error?.message ??
+          overageResult.error?.message ??
+          "Unable to load subscription outlet usage.",
+      );
+      return;
+    }
+    setServerActiveOutletCount(outletResult.count ?? 0);
+    setOverageOutletSlots(
+      merchant.tier === "enterprise"
+        ? (overageResult.data ?? []).reduce(
+            (total, row) => total + Number(row.outlet_quantity),
+            0,
+          )
+        : 0,
+    );
   };
 
   // Synchronize outlets state when merchant session becomes available
@@ -108,7 +152,11 @@ export default function OutletsPage() {
     maxOutlets: 1,
     name: "Basic",
   };
-  const canAddMore = outlets.length < tierLimit.maxOutlets;
+  const activeOutletCount =
+    serverActiveOutletCount ??
+    outlets.filter((outlet) => outlet.isActive).length;
+  const outletCapacity = tierLimit.maxOutlets + overageOutletSlots;
+  const canAddMore = activeOutletCount < outletCapacity;
 
   /**
    * Utility helper to generate a unique random pairing code for POS terminals.
@@ -343,7 +391,7 @@ export default function OutletsPage() {
       {/* Header with plan limits indicator and create trigger action */}
       <Header
         title="Outlets Management"
-        subtitle={`${outlets.length} / ${tierLimit.maxOutlets} outlets active on ${tierLimit.name} plan`}
+        subtitle={`${activeOutletCount} / ${outletCapacity} active outlets on ${tierLimit.name} plan`}
         actions={
           canAddMore ? (
             <Button
@@ -354,8 +402,12 @@ export default function OutletsPage() {
               New Outlet
             </Button>
           ) : (
-            <Button variant="secondary" disabled className="w-full sm:w-auto">
-              Plan Limit Reached
+            <Button
+              variant="secondary"
+              onClick={() => navigate("/merchant/billing")}
+              className="w-full sm:w-auto"
+            >
+              Plan limit reached · view plans
             </Button>
           )
         }

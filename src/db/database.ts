@@ -126,6 +126,15 @@ export class POSDatabase extends Dexie {
             delete outlet.pin;
           });
       });
+
+    // Version 5 indexes the durable sale outbox and links offline movement
+    // records to the sale they represent for safe, idempotent replay.
+    this.version(5).stores({
+      sales:
+        "id, outletId, receiptNumber, status, createdAt, syncStatus, [outletId+syncStatus]",
+      stockMovements:
+        "id, outletId, productId, saleId, createdAt, syncStatus",
+    });
   }
 
   async deleteSyncedData(outletId: string) {

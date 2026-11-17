@@ -99,13 +99,13 @@ export default defineConfig({
             minify: false,
             outDir: "desktop/dist",
             lib: {
-              formats: ["es"],
-              fileName: () => "preload.mjs",
+              formats: ["cjs"],
+              fileName: () => "preload.cjs",
             },
             rolldownOptions: {
               external: ["electron"],
               output: {
-                format: "es",
+                format: "cjs",
               },
             },
           },

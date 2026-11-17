@@ -400,7 +400,7 @@ export default function OutletReports() {
   // Retrieve authenticated outlet session and user details
   const { outletSession } = useAuth();
   const outlet = outletSession!.outlet;
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
 
   // Determine user role and whether cashier masking should apply
   const role = outletSession?.staff?.role ?? "cashier"; // Default to "cashier" if role is undefined

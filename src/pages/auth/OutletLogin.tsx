@@ -6,7 +6,7 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { useTheme } from "@/contexts/ThemeContext";
-import logo from "@/assets/favicon.ico";
+import logo from "@/assets/logo1.svg";
 
 /**
  * An active staff member authenticates with Auth and RLS derives their outlet.

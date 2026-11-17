@@ -39,3 +39,12 @@ package-lock.json
 yarn.lock
 supabase
 supabase_schema.sql
+
+# Keep deployable billing code and migrations visible to version control.
+!supabase/
+!supabase/migrations/
+!supabase/migrations/202611120001_billing_and_outlet_entitlements.sql
+!supabase/migrations/202611120002_admin_subscription_overrides.sql
+!supabase/functions/
+!supabase/functions/admin-merchant/
+!supabase/functions/admin-merchant/index.ts

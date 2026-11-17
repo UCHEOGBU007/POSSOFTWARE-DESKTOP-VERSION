@@ -2,10 +2,22 @@ import { v4 as uuidv4 } from "uuid";
 
 export const generateId = () => uuidv4();
 
+export const escapeHtml = (value: unknown): string =>
+  String(value ?? "").replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return entities[character];
+  });
+
 export const generateReceiptNumber = (outletId: string): string => {
   const prefix = outletId.slice(0, 4).toUpperCase();
   const ts = Date.now().toString(36).toUpperCase();
-  return `${prefix}-${ts}`;
+  return `${prefix}-${ts}-${uuidv4().slice(0, 6).toUpperCase()}`;
 };
 
 const currencyLocales: Record<string, string> = {

@@ -874,7 +874,7 @@ const defaultForm: ProductForm = {
 export default function InventoryPage() {
   const { outletSession } = useAuth();
   const outlet = outletSession!.outlet;
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
   const isManager = outletSession?.staff?.role === "manager";
 
   const { success, error: showError } = useToast();

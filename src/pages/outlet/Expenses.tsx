@@ -303,7 +303,7 @@ export default function ExpensesPage() {
   // ---------------------------------------------------------------------------
   const { outletSession } = useAuth();
   const outlet = outletSession!.outlet;
-  const outletCurrency = outlet.currency ?? "NGN";
+  const outletCurrency = outlet.currency ?? "IDR";
   const staff = outletSession!.staff;
   const { success, error: showError } = useToast();
 

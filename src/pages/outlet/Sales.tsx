@@ -500,7 +500,7 @@ import Modal from "@/components/ui/Modal";
 import Button from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 import { recordAuditLog, syncRecord } from "@/lib/sync";
-import { formatCurrency, formatDate } from "@/utils/helpers";
+import { escapeHtml, formatCurrency, formatDate } from "@/utils/helpers";
 import type { Sale } from "@/types";
 
 /**
@@ -515,7 +515,7 @@ export default function SalesHistory() {
   // ---------------------------------------------------------------------------
   const { outletSession } = useAuth();
   const outlet = outletSession?.outlet;
-  const outletCurrency = outlet?.currency ?? "NGN";
+  const outletCurrency = outlet?.currency ?? "IDR";
   const { success, error } = useToast();
 
   // ---------------------------------------------------------------------------
@@ -588,7 +588,10 @@ export default function SalesHistory() {
 
     return sales.filter((s) => {
       // 1. Enforce strict role boundary (Cashier: 24h | Manager: 30 days)
-      if (s.createdAt < roleCutoff) {
+      const needsOfflineReview =
+        (s.syncStatus === "pending" || Boolean(s.syncError)) &&
+        s.staffId === outletSession?.staff?.id;
+      if (s.createdAt < roleCutoff && !needsOfflineReview) {
         return false;
       }
 
@@ -629,23 +632,29 @@ export default function SalesHistory() {
       "Status",
     ];
 
+    const csvCell = (value: unknown) => {
+      let text = String(value ?? "");
+      if (/^[\t\r ]*[=+@-]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
     const rows = filtered.map((s) => [
-      `"${s.receiptNumber}"`,
-      `"${formatDate(s.createdAt)}"`,
-      `"${s.customerName ?? "Walk-in"}"`,
+      s.receiptNumber,
+      formatDate(s.createdAt),
+      s.customerName ?? "Walk-in",
       s.items.length,
-      `"${s.paymentMethod.toUpperCase()}"`,
+      s.paymentMethod.toUpperCase(),
       s.total,
-      `"${s.status}"`,
-    ]);
+      s.status,
+    ].map(csvCell));
 
     const csvContent =
       "data:text/csv;charset=utf-8," +
-      [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
+      encodeURIComponent(
+        [headers.map(csvCell).join(","), ...rows.map((e) => e.join(","))].join("\n"),
+      );
 
-    const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
+    link.setAttribute("href", csvContent);
     link.setAttribute(
       "download",
       `sales_history_${new Date().toISOString().slice(0, 10)}.csv`,
@@ -683,7 +692,7 @@ export default function SalesHistory() {
         </head>
         <body>
           <h1>Sales History Report (${isManager ? "Manager View - 30 Days" : "Cashier View - 24 Hours"})</h1>
-          <p class="meta">Outlet: ${outlet?.name || "Main Outlet"} | Generated: ${new Date().toLocaleString()} | Transactions: ${filtered.length} | Net Revenue: ${formatCurrency(totalRevenue, outletCurrency)}</p>
+          <p class="meta">Outlet: ${escapeHtml(outlet?.name || "Main Outlet")} | Generated: ${escapeHtml(new Date().toLocaleString())} | Transactions: ${filtered.length} | Net Revenue: ${escapeHtml(formatCurrency(totalRevenue, outletCurrency))}</p>
           <table>
             <thead>
               <tr>
@@ -701,26 +710,27 @@ export default function SalesHistory() {
                 .map(
                   (s) => `
                 <tr>
-                  <td class="mono">${s.receiptNumber}</td>
-                  <td>${formatDate(s.createdAt)}</td>
-                  <td>${s.customerName ?? "Walk-in"}</td>
+                  <td class="mono">${escapeHtml(s.receiptNumber)}</td>
+                  <td>${escapeHtml(formatDate(s.createdAt))}</td>
+                  <td>${escapeHtml(s.customerName ?? "Walk-in")}</td>
                   <td>${s.items.length}</td>
-                  <td>${s.paymentMethod.toUpperCase()}</td>
-                  <td class="right">${formatCurrency(s.total, outletCurrency)}</td>
-                  <td><span class="badge ${s.status}">${s.status}</span></td>
+                  <td>${escapeHtml(s.paymentMethod.toUpperCase())}</td>
+                  <td class="right">${escapeHtml(formatCurrency(s.total, outletCurrency))}</td>
+                  <td><span class="badge ${s.status === "refunded" ? "refunded" : "completed"}">${escapeHtml(s.status)}</span></td>
                 </tr>
               `,
                 )
                 .join("")}
             </tbody>
           </table>
-          <script>
-            window.onload = function() { window.print(); window.close(); };
-          </script>
         </body>
       </html>
     `;
 
+    printWindow.onload = () => {
+      printWindow.print();
+      printWindow.close();
+    };
     printWindow.document.write(html);
     printWindow.document.close();
   };
@@ -946,6 +956,20 @@ export default function SalesHistory() {
                         >
                           {sale.status}
                         </Badge>
+                        {sale.wasOffline && (
+                          <span className="ml-2">
+                            <Badge variant="info">Offline sale</Badge>
+                          </span>
+                        )}
+                        {sale.syncStatus === "pending" ? (
+                          <span className="ml-2">
+                            <Badge variant="warning">Pending sync</Badge>
+                          </span>
+                        ) : sale.syncError ? (
+                          <span className="ml-2" title={sale.syncError}>
+                            <Badge variant="danger">Review</Badge>
+                          </span>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
